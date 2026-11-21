@@ -1,5 +1,8 @@
 /* GPL-2.0-only. Two-child exact-profile headless release host replay. */
 #include "test_full.c"
+#ifndef GU_REPLAY_MAIN
+#define GU_REPLAY_MAIN main /* test_two_card_release.c reuses this replay with its own main */
+#endif
 static VOID PostUnlockStatusTest(VOID) {
   Check(RunFull(0)==EFI_SUCCESS,"new session for post-unlock status policy");
   UINT32 original=MockConfig[32];
@@ -47,7 +50,7 @@ static VOID LoadNv(const char *path) {
 #endif
   }
 }
-int main(int argc,char **argv) {
+int GU_REPLAY_MAIN(int argc,char **argv) {
   Check(argc==4,"nvgop image, PROM and full PCI fixture required");
   LoadNv(argv[1]);
   FILE *f=fopen(argv[2],"rb");Check(f && fread(PromMemory,1,sizeof(PromMemory),f)==sizeof(PromMemory),"read pinned PROM");fclose(f);
@@ -87,7 +90,7 @@ int main(int argc,char **argv) {
   return 0;
 }
 #else
-int main(int argc,char **argv) {
+int GU_REPLAY_MAIN(int argc,char **argv) {
   Check(argc==5,"two PE code fixtures, PROM and full PCI fixture required");
   LoadDriverFixture(argv[1],MouseMemory,sizeof(MouseMemory));LoadDriverFixture(argv[2],NvMemory,sizeof(NvMemory));
   FILE *f=fopen(argv[3],"rb");Check(f && fread(PromMemory,1,sizeof(PromMemory),f)==sizeof(PromMemory),"read pinned PROM");fclose(f);

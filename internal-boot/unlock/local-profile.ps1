@@ -141,7 +141,7 @@ function Get-LocalInputDigest($Inputs) {
  try{return (($sha.ComputeHash($bytes) | ForEach-Object {$_.ToString('x2')}) -join '')}finally{$sha.Dispose()}
 }
 function Get-LocalTreeDigest([string]$Repo) {Get-LocalInputDigest @(Get-LocalTreeInputs $Repo)}
-function Get-LocalExpectedJobs([bool]$NoEdidDriver=$false,[bool]$ConsoleAggregate=$false) {
+function Get-LocalExpectedJobs([bool]$NoEdidDriver=$false,[bool]$ConsoleAggregate=$false,[bool]$TwoCard=$false) {
  if($NoEdidDriver -and $ConsoleAggregate){throw 'Aggregate replay requires an EDID driver'}
  $jobs=[ordered]@{'generator refusals'=0;'stock-selection'=0;'checks (real config)'=0;
  'checks other profile (must reject)'=1;'port'=0;'fresh PCI identity'=0;'write-lock'=0;'master-attributes'=0;'runtime'=0;
@@ -153,6 +153,8 @@ function Get-LocalExpectedJobs([bool]$NoEdidDriver=$false,[bool]$ConsoleAggregat
  if($ConsoleAggregate){$jobs['release replay, aggregate console (real graph)']=0}
  elseif($NoEdidDriver){$jobs['release replay, no EDID driver (real graph)']=0}
  else {$jobs['release replay, EDID driver (real graph)']=0}
+ # Local two-card lane (2026-11-21): profile-local-extra.h adds its own exact jobs.
+ if($TwoCard){$jobs['two-card discovery + nvgop pin']=0;$jobs['two-card wrapper release (real graph + nvgop)']=0}
  return $jobs
 }
 function Get-LocalObjectNames($Value) {
@@ -219,7 +221,7 @@ function Assert-LocalProfileEvidence([string]$Repo) {
   if($e.Inputs[$i].Path -cne $inputs[$i].Path -or $e.Inputs[$i].Sha256 -cne $inputs[$i].Sha256){throw 'Build input path/hash changed after tests'}
  }
  if($e.TreeSha256 -cne (Get-LocalInputDigest $inputs)){throw 'Build input digest changed after tests'}
- $jobs=Get-LocalExpectedJobs $hw.NoEdidDriver $hw.ConsoleAggregate
+ $jobs=Get-LocalExpectedJobs $hw.NoEdidDriver $hw.ConsoleAggregate (Test-Path -LiteralPath (Join-Path $Repo 'internal-boot/unlock/profile-local-extra.h') -PathType Leaf)
  Assert-LocalKeys $e.Results @($jobs.Keys) 'Host jobs'
  foreach($name in $jobs.Keys){
   $job=$e.Results.$name
@@ -236,8 +238,15 @@ function Assert-LocalProfilePackage([string]$Repo,$Manifest) {
 }
 
 function Assert-GuUsbManifest([string]$Repo,$Manifest) {
+ # Local two-card lane (2026-11-21): the two-card mode exists only for a local profile built
+ # with -SecondCard while profile-local-extra.h is present; everything else stays single-card.
+ $twoCardMode=$Manifest.SecondCard -is [bool] -and $Manifest.SecondCard -and
+   $Manifest.HardwareProfile -is [string] -and $Manifest.HardwareProfile -cmatch '^LOCAL-' -and
+   (Test-Path -LiteralPath (Join-Path $Repo 'internal-boot/unlock/profile-local-extra.h') -PathType Leaf)
+ $expectedMode=if($twoCardMode){'two-card-headless-unlock-then-windows-usb'}else{'single-rtx-headless-unlock-then-windows-usb'}
+ if($null -ne $Manifest.SecondCard -and ($Manifest.SecondCard -isnot [bool] -or ($Manifest.SecondCard -and !$twoCardMode))){throw 'Invalid two-card USB manifest; rebuild the package'}
  if(!(Test-GuExactInteger $Manifest.Format 2) -or
-    $Manifest.Mode -cne 'single-rtx-headless-unlock-then-windows-usb' -or
+    $Manifest.Mode -cne $expectedMode -or
     $Manifest.CanUnlock -isnot [bool] -or !$Manifest.CanUnlock -or
     $Manifest.RequiresHumanKey -isnot [bool] -or $Manifest.RequiresHumanKey -or
     $Manifest.HardwareTested -isnot [bool] -or $Manifest.HardwareTested){throw 'Invalid headless USB manifest format/mode/flags; rebuild the package'}

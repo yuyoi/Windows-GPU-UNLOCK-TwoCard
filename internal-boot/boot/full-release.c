@@ -34,7 +34,7 @@ typedef struct {
 #endif
 } FULL;
 static FULL Full;
-static UINT64 GuPeekBar0Base;
+static UINT64 GuPeekBar0Base=GU_BAR0_BASE; /* named multi-card profiles refresh it in GuPeekCold */
 static BOOLEAN OwnRecord(EFI_HANDLE h,const EFI_OPEN_PROTOCOL_INFORMATION_ENTRY *e) {
   return Full.Owned && h==PreparedPlan.RtxPci && e->AgentHandle==Full.Image && !e->ControllerHandle &&
     e->Attributes==EFI_OPEN_PROTOCOL_EXCLUSIVE && e->OpenCount==1;
@@ -44,46 +44,79 @@ static EFI_STATUS Note(const char *event,EFI_STATUS s) {
   EFI_STATUS written=Full.Log(Full.Context,event,s);return s==EFI_SUCCESS?written:s;
 }
 static BOOLEAN CodeRange(UINTN base,UINT64 size,UINTN rva,UINTN bytes,UINTN stop);
-#if GU_MULTI_TARGET && defined(GU_HEADLESS_RESEARCH) && GU_CONSOLE_AGGREGATE
+#if GU_MULTI_TARGET && defined(GU_HEADLESS_RESEARCH) && (GU_CONSOLE_AGGREGATE || defined(GU_LOCAL_TWO_CARD))
 #define GU_RELEASE_AGENT_WINDOW 1
 #else
 #define GU_RELEASE_AGENT_WINDOW 0
+#endif
+/* Local two-card lane: the second card's firmware nvgop is its own option-ROM
+   image (0x6000b here), not the console card's (0x6000a). Pin that image and
+   the exact second card it came from instead of the console constants. */
+#if GU_RELEASE_AGENT_WINDOW && defined(GU_LOCAL_TWO_CARD)
+#define GU_RELEASED_NVGOP_VERSION GU_EXTRA_NVGOP_VERSION
+#define GU_RELEASED_NVGOP_IMAGE_SIZE GU_EXTRA_NVGOP_IMAGE_SIZE
+#define GU_RELEASED_NVGOP_STOP GU_EXTRA_NVGOP_STOP
+#define GU_RELEASED_NVGOP_TEXT_BYTES GU_EXTRA_NVGOP_TEXT_BYTES
+#define GU_RELEASED_NVGOP_TEXT_SHA256 GU_EXTRA_NVGOP_TEXT_SHA256
+#else
+#define GU_RELEASED_NVGOP_VERSION GU_NVGOP_VERSION
+#define GU_RELEASED_NVGOP_IMAGE_SIZE GU_NVGOP_IMAGE_SIZE
+#define GU_RELEASED_NVGOP_STOP GU_NVGOP_STOP
+#define GU_RELEASED_NVGOP_TEXT_BYTES GU_NVGOP_TEXT_BYTES
+#define GU_RELEASED_NVGOP_TEXT_SHA256 GU_NVGOP_TEXT_SHA256
 #endif
 /* A baseline BY_DRIVER edge may legitimately be absent after the child ran
    when its agent is the fingerprinted nvgop-ga1xx image bound to a non-console
    GPU: the child's exact-card unlock releases that driver itself. Any other
    removal, any attribute/count drift, or an agent that fails the byte-exact
    nvgop fingerprint still fails the graph comparison. */
-static EFI_STATUS NvgopAgent(EFI_BOOT_SERVICES *bs,EFI_HANDLE agent) {
 #if GU_RELEASE_AGENT_WINDOW
+static EFI_STATUS NvgopAgent(EFI_BOOT_SERVICES *bs,EFI_HANDLE agent,EFI_HANDLE *device) {
   EFI_DRIVER_BINDING_PROTOCOL *d=NULL;EFI_LOADED_IMAGE_PROTOCOL *im=NULL;
+  if(device)*device=NULL;
   EFI_STATUS s=Interface(bs,agent,&BindingGuid,(VOID **)&d);
-  if(s!=EFI_SUCCESS || !d || !d->Stop || d->DriverBindingHandle!=agent || d->Version!=GU_NVGOP_VERSION || !d->ImageHandle)return EFI_UNSUPPORTED;
+  if(s!=EFI_SUCCESS || !d || !d->Stop || d->DriverBindingHandle!=agent || d->Version!=GU_RELEASED_NVGOP_VERSION || !d->ImageHandle)return EFI_UNSUPPORTED;
   s=Interface(bs,d->ImageHandle,&ImageGuid,(VOID **)&im);
-  if(s!=EFI_SUCCESS || !im || !im->ImageBase || im->ImageSize!=GU_NVGOP_IMAGE_SIZE ||
-     im->ImageCodeType!=EfiBootServicesCode || (UINTN)d->Stop!=(UINTN)im->ImageBase+GU_NVGOP_STOP || !im->FilePath)return EFI_UNSUPPORTED;
-  VOID *pci=NULL;
-  if(!im->DeviceHandle || Interface(bs,im->DeviceHandle,&PciGuid,&pci)!=EFI_SUCCESS || !pci ||
+  if(s!=EFI_SUCCESS || !im || !im->ImageBase || im->ImageSize!=GU_RELEASED_NVGOP_IMAGE_SIZE ||
+     im->ImageCodeType!=EfiBootServicesCode || (UINTN)d->Stop!=(UINTN)im->ImageBase+GU_RELEASED_NVGOP_STOP || !im->FilePath)return EFI_UNSUPPORTED;
+  EFI_PCI_IO_PROTOCOL *pci=NULL;
+  if(!im->DeviceHandle || Interface(bs,im->DeviceHandle,&PciGuid,(VOID **)&pci)!=EFI_SUCCESS || !pci ||
      im->DeviceHandle==PreparedPlan.RtxPci)return EFI_UNSUPPORTED;
+#ifdef GU_LOCAL_TWO_CARD
+  /* The option ROM this driver came from must be the exact second card. */
+  {
+    UINTN seg=0,bus=0,dev=0,fun=0;UINT32 id=0,sub=0;
+    if(!pci->GetLocation || pci->GetLocation(pci,&seg,&bus,&dev,&fun)!=EFI_SUCCESS ||
+       seg!=GU_EXTRA_TARGET_SEGMENT || bus!=GU_EXTRA_TARGET_BUS || dev || fun ||
+       !pci->Pci.Read || pci->Pci.Read(pci,EfiPciIoWidthUint32,0,1,&id)!=EFI_SUCCESS ||
+       pci->Pci.Read(pci,EfiPciIoWidthUint32,0x2c,1,&sub)!=EFI_SUCCESS ||
+       id!=GU_EXTRA_BOARD_ID || sub!=GU_EXTRA_BOARD_SUBSYSTEM)return EFI_UNSUPPORTED;
+  }
+#endif
   UINTN n=0;const CHAR16 name[]=L"nvgop-ga1xx";
   if(!GuInspectPath(im->FilePath,NULL,&n,NULL,NULL) || n!=4+sizeof(name)+4 ||
      im->FilePath->Type!=MEDIA_DEVICE_PATH || im->FilePath->SubType!=MEDIA_FILEPATH_DP ||
      im->FilePath->Length[0]!=4+sizeof(name) || im->FilePath->Length[1] ||
      !Bytes((UINT8 *)im->FilePath+4,name,sizeof(name)))return EFI_UNSUPPORTED;
   UINTN base=(UINTN)im->ImageBase;
-  if(!CodeRange(base,im->ImageSize,0x280,GU_NVGOP_TEXT_BYTES,GU_NVGOP_STOP) ||
-     d->Stop!=(EFI_DRIVER_BINDING_STOP)(base+GU_NVGOP_STOP))return EFI_UNSUPPORTED;
-  return GuHashMatches((UINT8 *)base+0x280,GU_NVGOP_TEXT_BYTES,GU_NVGOP_TEXT_SHA256)?EFI_SUCCESS:EFI_CRC_ERROR;
-#else
-  (void)bs;(void)agent;return EFI_UNSUPPORTED;
-#endif
+  if(!CodeRange(base,im->ImageSize,0x280,GU_RELEASED_NVGOP_TEXT_BYTES,GU_RELEASED_NVGOP_STOP) ||
+     d->Stop!=(EFI_DRIVER_BINDING_STOP)(base+GU_RELEASED_NVGOP_STOP))return EFI_UNSUPPORTED;
+  if(!GuHashMatches((UINT8 *)base+0x280,GU_RELEASED_NVGOP_TEXT_BYTES,GU_RELEASED_NVGOP_TEXT_SHA256))return EFI_CRC_ERROR;
+  if(device)*device=im->DeviceHandle;
+  return EFI_SUCCESS;
 }
+#endif
 static BOOLEAN ReleasedEdge(const EDGE *e) {
 #if GU_RELEASE_AGENT_WINDOW
   if(e->Attributes!=EFI_OPEN_PROTOCOL_BY_DRIVER || e->Count!=1 || !e->Agent || !e->Controller)return FALSE;
-  static EFI_HANDLE cached;static BOOLEAN cachedOk;
-  if(e->Agent!=cached){cached=e->Agent;cachedOk=!EFI_ERROR(NvgopAgent(Full.Table->BootServices,e->Agent));}
-  return cachedOk;
+  /* No cache: every tolerated absence re-proves the fingerprint (local two-card lane). */
+  EFI_HANDLE device=NULL;
+  if(EFI_ERROR(NvgopAgent(Full.Table->BootServices,e->Agent,&device)))return FALSE;
+#ifdef GU_LOCAL_TWO_CARD
+  /* Only the driver's own PciIo BY_DRIVER open on the card it came from. */
+  if(e->Handle!=device || e->Controller!=device || !GuGuidEqual(&e->Protocol,&PciGuid))return FALSE;
+#endif
+  return TRUE;
 #else
   (void)e;return FALSE;
 #endif
@@ -199,8 +232,15 @@ EFI_STATUS GuPeekCold(EFI_SYSTEM_TABLE *t,UINT32 *values) {
   /* Require memory decode, no bus mastering and the exact 32-bit memory BAR
    * before asking for its descriptor, then recheck after allocation/free calls.
    * Firmware callbacks are not atomic; this guards service-return boundaries. */
-  if((targetConfig[1]&6U)!=2U || (targetConfig[4]&1U) || !(targetConfig[4]&0xfffffff0U))return EFI_UNSUPPORTED;
-  GuPeekBar0Base=(UINT64)(targetConfig[4]&0xfffffff0U);
+  /* A 16 MiB-aligned 32-bit non-prefetchable memory BAR (type bits zero). Only the
+     reviewed named multi-card profiles take the firmware-assigned base; single-card
+     and local builds keep the exact captured base (the local console card's BAR0
+     did not move when the second card was added). */
+  if((targetConfig[1]&6U)!=2U || (targetConfig[4]&0xfU) || (targetConfig[4]&0xffffffU) || !targetConfig[4])return EFI_UNSUPPORTED;
+#if !GU_MULTI_TARGET || defined(GU_PROFILE_LOCAL)
+  if(targetConfig[4]!=(UINT32)GU_BAR0_BASE)return EFI_UNSUPPORTED;
+#endif
+  GuPeekBar0Base=(UINT64)targetConfig[4];
   s=PeekConfig(bs,targetHandle,target,targetConfig);
   if(s==EFI_SUCCESS)s=PeekBar(bs,target);
   if(s==EFI_SUCCESS)s=PeekConfig(bs,targetHandle,target,targetConfig);
@@ -506,8 +546,12 @@ static BOOLEAN FullExpected(const GRAPH *g,UINTN stage) {
     if(stage>=3 && e->Handle==PreparedPlan.Rtx && e->Agent==Full.EdidAgent && GuGuidEqual(&e->Protocol,&EdidGuid))continue;
 #endif
     if(stage>=4 && e->Handle==PreparedPlan.RtxPci && e->Agent==Full.NvAgent)continue;
-    wanted++;UINTN found=0;
+    UINTN found=0;
     for(UINTN j=0;j<g->Count;j++)if(SameEdge(e,&g->Edges[j]))found++;
+    /* Local two-card lane: the child's guarded release of the second card's
+       fingerprinted nvgop removes exactly this edge; nothing else may vanish. */
+    if(!found && ReleasedEdge(e))continue;
+    wanted++;
     if(found!=1)return FALSE;
   }
   return g->Count==wanted+own;

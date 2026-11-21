@@ -4,6 +4,7 @@
 #include "checks.h"
 #include "sha256.h"
 #include "ownership.h"
+#include "release-pin.h"
 #include "vendor/unlock_610.h"
 #include "vendor/gfw_eval.h"
 #include <Protocol/GraphicsOutput.h>
@@ -224,6 +225,20 @@ static EFI_STATUS RestoreDecode(VOID) {
   if(!GuLogReady() || Gu.fault)return EFI_DEVICE_ERROR;
   return matched?EFI_SUCCESS:EFI_COMPROMISED_DATA;
 }
+/* Local two-card lane: see GuReleaseOwnerMatchesSpec (ownership.c). */
+static EFI_STATUS OwnerFingerprintQuiet(const GU_RELEASE_OWNER *Owner) {
+  return GuReleaseOwnerMatchesSpec(Owner,GuTargetSpec(Gu.card_index));
+}
+#if !defined(GU_AUTOMATIC_BOOT) || GU_MULTI_TARGET
+static EFI_STATUS OwnerFingerprint(const GU_RELEASE_OWNER *Owner) {
+  EFI_STATUS s=OwnerFingerprintQuiet(Owner);
+  const GU_CARD_SPEC *spec=GuTargetSpec(Gu.card_index);
+  GuLog("card %zu release-owner fingerprint: pinned=%u version=%#x size=%#llx status=%#llx\n",
+    (size_t)Gu.card_index,(unsigned)(spec && spec->nvgop_text_sha256),Owner?Owner->version:0,
+    (unsigned long long)(Owner?Owner->size:0),(unsigned long long)s);
+  return s;
+}
+#endif
 static EFI_STATUS BindTarget(UINTN Index) {
   GuActivate(Index);
   if(Gu.fault)return EFI_DEVICE_ERROR;
@@ -431,10 +446,15 @@ static EFI_STATUS RunCard(UINTN Index,EFI_SYSTEM_TABLE *St,BOOLEAN *Attempted,BO
   if(EFI_ERROR(status))return status;
 #endif
   Stage="ownership";status=GuClaimController();
+  /* Single-card automatic builds never release a driver: the wrapper already did.
+     Only multi-card builds release a non-console card's driver (PR #82). */
+#if !defined(GU_AUTOMATIC_BOOT) || GU_MULTI_TARGET
   if(status==EFI_ACCESS_DENIED) {
     status=GuFindReleaseOwner(St,&PendingOwner,TRUE);
+    if(!EFI_ERROR(status))status=OwnerFingerprint(&PendingOwner);
     if(!EFI_ERROR(status))GuLogText("Exclusive ownership deferred until the guarded driver release.\n");
   }
+#endif
   status=Step(status);if(EFI_ERROR(status))return status;
   Stage="config-recheck";status=Step(ConfigCheck(FALSE));if(EFI_ERROR(status))return status;
   Stage="bar0";status=Step(BarCheck());if(EFI_ERROR(status))return status;
@@ -454,6 +474,8 @@ static EFI_STATUS RunCard(UINTN Index,EFI_SYSTEM_TABLE *St,BOOLEAN *Attempted,BO
        successful final comparison and DisconnectController. */
     status=GuFindReleaseOwner(St,&current,FALSE);
     if(!EFI_ERROR(status) && !GuSameReleaseOwner(&PendingOwner,&current))status=EFI_ABORTED;
+    /* No file IO here: the fingerprint is rechecked silently right before the disconnect. */
+    if(!EFI_ERROR(status))status=OwnerFingerprintQuiet(&current);
     if(EFI_ERROR(status)){status=Step(status);return status;}
     EFI_PCI_IO_PROTOCOL *prior=Gu.pci;
     Stage="driver-release";*ReleaseAttempted=TRUE;Gu.armed=TRUE;Gu.pci=NULL;
@@ -477,11 +499,11 @@ static EFI_STATUS RunCard(UINTN Index,EFI_SYSTEM_TABLE *St,BOOLEAN *Attempted,BO
   Stage="final-prom";status=Step(PromCheck());if(EFI_ERROR(status))return status;
   Stage="final-cold";status=Step(ColdCheck());if(EFI_ERROR(status))return status;
   if(!Gu.profile_verified || Gu.fault)return EFI_ACCESS_DENIED;
-  GuLog("ARMED card %zu: one transaction is starting. Do not reset or remove the USB.\n",(size_t)Gu.card_index);
+  GuLog("ARMED: one transaction is starting. Do not reset or remove the USB. card=%zu\n",(size_t)Gu.card_index);
   if(!GuLogReady())return EFI_DEVICE_ERROR;
 #ifdef GU_HEADLESS_RESEARCH
   /* File callbacks may change devices; no log/output between this gate and core. */
-  if(!HeadlessFinalHardware() || !GuHeadlessCheck())return EFI_NOT_READY;
+  if(!HeadlessFinalHardware() || !GuHeadlessCheck() || !GuHeadlessTargetClean())return EFI_NOT_READY;
 #endif
   Stage="transaction";Gu.armed=TRUE;*Attempted=TRUE;
   UINT64 mask=0xffffffffULL;

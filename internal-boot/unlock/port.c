@@ -51,7 +51,11 @@ UINT32 GuTargetSub(VOID) { return Gu.board_subsystem; }
 static BOOLEAN GuCardHasChildren(EFI_HANDLE Handle) {
   EFI_GUID pci=EFI_PCI_IO_PROTOCOL_GUID;
   EFI_OPEN_PROTOCOL_INFORMATION_ENTRY *entries=NULL;UINTN count=0;BOOLEAN children=FALSE;
-  if(EFI_ERROR(Gu.bs->OpenProtocolInformation(Handle,&pci,&entries,&count)))return FALSE;
+  /* Open-protocol snapshots run at TPL_NOTIFY like every other ownership read. */
+  EFI_TPL old=Gu.bs->RaiseTPL(TPL_NOTIFY);
+  EFI_STATUS s=Gu.bs->OpenProtocolInformation(Handle,&pci,&entries,&count);
+  Gu.bs->RestoreTPL(old);
+  if(EFI_ERROR(s))return FALSE;
   for(UINTN i=0;i<count;i++)
     if(entries[i].Attributes==EFI_OPEN_PROTOCOL_BY_CHILD_CONTROLLER)children=TRUE;
   if(entries && EFI_ERROR(Gu.bs->FreePool(entries)))children=FALSE;
@@ -68,18 +72,47 @@ EFI_STATUS GuDiscoverTargets(VOID) {
   GuLog("PCI enumeration: status=%#llx handles=%zu\n",(unsigned long long)status,(size_t)count);
   if(EFI_ERROR(status) || !handles || !count || count>256){if(handles)GuFree(handles);return EFI_NOT_FOUND;}
   UINTN found=0;
-  for(UINTN i=0;i<count && found<GU_MAX_TARGETS;i++) {
+  /* Local two-card lane: a card registers only on an exact row match (PCI ID,
+     subsystem and, when the row pins it, segment/bus at device 0 function 0).
+     A same-ID card with another subsystem or location is never a target, and a
+     row may match one card only. Upstream PR #82 review finding. */
+  const UINTN rows=sizeof(GuCardTable)/sizeof(GuCardTable[0]);
+  BOOLEAN rowUsed[sizeof(GuCardTable)/sizeof(GuCardTable[0])]={0};
+  UINTN sameIdMismatch=0;
+  for(UINTN i=0;i<count;i++) {
     EFI_PCI_IO_PROTOCOL *pci=NULL;UINT32 id=0,sub=0;
     status=Gu.bs->HandleProtocol(handles[i],&pci_guid,(VOID **)&pci);
     if(!EFI_ERROR(status) && pci){status=pci->Pci.Read(pci,EfiPciIoWidthUint32,0,1,&id);}
-    if(EFI_ERROR(status) || !pci){GuLog("PCI scan failed: index=%zu status=%#llx\n",(size_t)i,(unsigned long long)status);break;}
+    if(EFI_ERROR(status) || !pci){GuLog("PCI scan failed: index=%zu status=%#llx\n",(size_t)i,(unsigned long long)status);status=EFI_DEVICE_ERROR;break;}
+    BOOLEAN known=FALSE;
+    for(UINTN t=0;t<rows;t++)if(id==GuCardTable[t].id)known=TRUE;
+    if(!known)continue;
     status=pci->Pci.Read(pci,EfiPciIoWidthUint32,0x2c,1,&sub);
     if(EFI_ERROR(status)){GuLog("PCI subsystem read failed: index=%zu\n",(size_t)i);break;}
-    for(UINTN t=0;t<sizeof(GuCardTable)/sizeof(GuCardTable[0]);t++) {
-      if(id!=GuCardTable[t].id)continue;
-      UINTN seg,bus,dev,fun;
-      status=pci->GetLocation(pci,&seg,&bus,&dev,&fun);
-      if(EFI_ERROR(status))break;
+    UINTN seg=0,bus=0,dev=0,fun=0;
+    if(!pci->GetLocation){status=EFI_UNSUPPORTED;break;}
+    status=pci->GetLocation(pci,&seg,&bus,&dev,&fun);
+    if(EFI_ERROR(status))break;
+    UINTN row=rows;
+    for(UINTN t=0;t<rows;t++) {
+      const GU_CARD_SPEC *c=&GuCardTable[t];
+      if(id!=c->id || sub!=c->subsystem)continue;
+      if(c->bus && (seg!=c->segment || bus!=c->bus || dev || fun))continue;
+      row=t;break;
+    }
+    if(row==rows) {
+      sameIdMismatch++;
+      GuLog("PCI card id=%#x sub=%#x bdf=%zu:%02zu:%02zu.%zu matches no reviewed row exactly; not a target\n",
+        id,sub,(size_t)seg,(size_t)bus,(size_t)dev,(size_t)fun);
+      continue;
+    }
+    if(rowUsed[row] || found>=GU_MAX_TARGETS) {
+      GuLog("PCI card id=%#x bdf=%zu:%02zu:%02zu.%zu duplicates row %zu; refusing\n",
+        id,(size_t)seg,(size_t)bus,(size_t)dev,(size_t)fun,(size_t)row);
+      status=EFI_UNSUPPORTED;break;
+    }
+    rowUsed[row]=TRUE;
+    for(UINTN t=row;t==row;t++) {
       BOOLEAN console=GuCardHasChildren(handles[i]);
       /* Insert before the console card so non-console targets run first. */
       UINTN pos=found;
@@ -101,20 +134,22 @@ EFI_STATUS GuDiscoverTargets(VOID) {
       GuTargets_[pos].console=console;
       GuLog("target[%zu]: %s id=%#x sub=%#x bdf=%zu:%02zu:%02zu.%zu console=%u\n",
         (size_t)pos,GuCardTable[t].name,id,sub,(size_t)seg,(size_t)bus,(size_t)dev,(size_t)fun,(unsigned)console);
-      if(sub!=GuCardTable[t].subsystem)
-        GuLog("target[%zu]: subsystem %#x differs from reviewed %#x\n",(size_t)pos,sub,GuCardTable[t].subsystem);
       found++;
-      break;
     }
-    if(EFI_ERROR(status))break;
   }
   GuFree(handles);
+  if(EFI_ERROR(status))found=0;
   GuTargetCount_=found;
-  GuLog("PCI targets registered=%zu status=%#llx\n",(size_t)found,(unsigned long long)status);
+  GuLog("PCI targets registered=%zu rows=%zu unmatched-same-id=%zu status=%#llx\n",
+    (size_t)found,(size_t)rows,(size_t)sameIdMismatch,(unsigned long long)status);
   if(EFI_ERROR(status))return status;
   if(!found)return EFI_NOT_FOUND;
 #if !GU_MULTI_TARGET
   if(found!=1)return EFI_UNSUPPORTED;
+#else
+  /* Every reviewed row must be present exactly once: a missing card means this is
+     not the captured machine state, so nothing runs. */
+  if(found!=rows)return EFI_UNSUPPORTED;
 #endif
   return EFI_SUCCESS;
 }
@@ -166,6 +201,13 @@ BOOLEAN GuSelectorPhase(UINT32 Phase) {
 VOID GuInit(EFI_BOOT_SERVICES *Bs, EFI_PCI_IO_PROTOCOL *Pci) {
   memset(&Gu,0,sizeof(Gu)); Gu.bs=Bs; Gu.pci=Pci;
   GuTargetCount_=0;GuActive_=(UINTN)-1;GuVolatileCount_=0;
+  /* Until discovery activates a card, the context is the compile-time console
+     card exactly as before the multi-card registry (single-card builds, the
+     pre-discovery stages and the host tests rely on this). */
+  Gu.board_id=GU_BOARD_ID;Gu.board_subsystem=GU_BOARD_SUBSYSTEM;
+  Gu.segment=GU_TARGET_SEGMENT;Gu.bus=GU_TARGET_BUS;
+  Gu.expected_chip=GU_CHIP_ID;Gu.expected_memory=GU_DEVICE_MEMORY_SIZE;
+  Gu.prom_sha256=GU_PROM_SHA256;Gu.card_name=GU_PROFILE_NAME;
 }
 /* The active card recorded BDF and PCI identity; bus is no longer fixed. */
 BOOLEAN GuTargetConfig(const UINT32 *C, UINTN S, UINTN B, UINTN D, UINTN F) {

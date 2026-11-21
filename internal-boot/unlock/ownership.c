@@ -104,7 +104,9 @@ EFI_STATUS GuFindReleaseOwner(EFI_SYSTEM_TABLE *Table,GU_RELEASE_OWNER *Owner,BO
   /* The authorized disconnect tears down this driver opens across the whole
      handle database. Register every handle the agent touches, plus its driver
      image and device handles, so the headless graph treats those edges as the
-     expected release rather than foreign change. */
+     expected release rather than foreign change. Multi-card builds only: a
+     single-card child never releases a driver the wrapper did not already release. */
+#if GU_MULTI_TARGET
   GuAddVolatileHandle(Owner->agent);
   GuAddVolatileHandle(Owner->image);
   GuAddVolatileHandle(image->DeviceHandle);
@@ -130,6 +132,7 @@ EFI_STATUS GuFindReleaseOwner(EFI_SYSTEM_TABLE *Table,GU_RELEASE_OWNER *Owner,BO
       if(EFI_ERROR(Gu.bs->FreePool(all)))GuAddVolatileHandle(Owner->agent);
     }
   }
+#endif
   return EFI_SUCCESS;
 }
 BOOLEAN GuSameReleaseOwner(const GU_RELEASE_OWNER *A,const GU_RELEASE_OWNER *B) {
@@ -183,3 +186,4 @@ done:
   if(status!=EFI_SUCCESS)Gu.pci=NULL;
   RefreshBusy=FALSE;return status;
 }
+

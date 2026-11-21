@@ -30,6 +30,11 @@ Import-GuHostCompiler $VcVars
 $reviewed=@(@('-DGU_PROFILE_B650M_3090FE','220410de','145410de'),@('-DGU_PROFILE_B660M_3070TI','248210de','50521462'),@('-DGU_PROFILE_X870_3090TI','220310de','88701043'))
 $foreign=($reviewed | Where-Object {$_[1] -ne $hw.TargetPci -or $_[2] -ne $hw.Subsystem} | Select-Object -First 1)[0]
 $profile=@($hw.Define)
+# Local two-card lane (2026-11-21): profile-local-extra.h (hand-written) plus the second card's
+# captured nvgop image. The single-card jobs above and below stay exactly as before.
+$script:twoCard=Test-Path -LiteralPath (Join-Path $repo 'internal-boot/unlock/profile-local-extra.h') -PathType Leaf
+$secondNvgop=Join-Path $local 'second-card/NVGOP-6000B.BIN'
+if($script:twoCard -and !(Test-Path -LiteralPath $secondNvgop -PathType Leaf)){throw 'Second-card nvgop fixture missing: research/profile/local/second-card/NVGOP-6000B.BIN'}
 $prom=Join-Path $fx 'PROM.BIN';$probe=Join-Path $fx 'probe/REPORT.TXT';$cold=Join-Path $fx 'cold/REPORT.TXT'
 $results=[ordered]@{}
 function Run-Job([string]$name,[string[]]$compile,[string[]]$run,[int]$expect=0) {
@@ -67,6 +72,10 @@ try {
  Run-Job 'checks other profile (must reject)' ($flags+@($foreign,'tests/test_checks.c','checks.c','-o',"$out/checks-other.exe")) @("./$out/checks-other.exe",$probe) 1
  Run-Job 'port' ($flags+$profile+@('-DGU_HOST_WRITE_TEST','tests/test_port.c','port.c','-o',"$out/port.exe")) @("./$out/port.exe")
  Run-Job 'fresh PCI identity' ($flags+$profile+@('-DGU_HOST_WRITE_TEST','tests/test_refresh_identity.c','ownership.c','port.c','-o',"$out/fresh-identity.exe")) @("./$out/fresh-identity.exe")
+ # Local two-card lane (2026-11-21): only when the hand-written second-card header exists.
+ if($script:twoCard) {
+  Run-Job 'two-card discovery + nvgop pin' ($flags+$profile+@('-DGU_LOCAL_SECOND_CARD','-DGU_HOST_WRITE_TEST','tests/test_two_card.c','port.c','ownership.c','sha256.c','-o',"$out/two-card.exe")) @("./$out/two-card.exe",$secondNvgop)
+ }
  Run-Job 'write-lock' ($flags+$profile+@('tests/test_preflight_lock.c','port.c','-o',"$out/write-lock.exe")) @("./$out/write-lock.exe")
  Run-Job 'master-attributes' ($flags+$profile+$defs+@('-DGU_HOST_WRITE_TEST','tests/test_master_attributes.c')+$core+@('-o',"$out/master.exe")) @("./$out/master.exe")
  Run-Job 'runtime' ($flags+@('-fno-builtin','tests/test_runtime.c','format.c',"$out/runtime-host.obj",'-o',"$out/runtime.exe")) @("./$out/runtime.exe")
@@ -127,6 +136,10 @@ try {
    $releaseArgs=@('./build/release/test-release-local.exe',$edidImage,$driverImage,$prom)
   }
   Run-Job $releaseName ($w+$profile+$releaseExtra+@('-DGU_HEADLESS_RESEARCH','-DGU_SINGLE_RTX_CONSOLE','-DGU_FULL_UNLOCK','-DGU_AUTOMATIC_BOOT',$releaseSource,'console-flow.c','../unlock/checks.c','../unlock/sha256.c','-o','build/release/test-release-local.exe')) $releaseArgs
+  if($script:twoCard) {
+   if($hw.ConsoleAggregate -or !$hw.NoEdidDriver){throw 'The two-card wrapper replay covers the non-aggregate no-EDID console only'}
+   Run-Job 'two-card wrapper release (real graph + nvgop)' ($w+$profile+@('-DGU_LOCAL_SECOND_CARD','-DGU_HEADLESS_RESEARCH','-DGU_SINGLE_RTX_CONSOLE','-DGU_FULL_UNLOCK','-DGU_AUTOMATIC_BOOT','test_two_card_release.c','console-flow.c','../unlock/checks.c','../unlock/sha256.c','-o','build/release/test-two-card-release.exe')) @('./build/release/test-two-card-release.exe',$driverImage,$prom,$configPath,$secondNvgop)
+  }
 } finally {Pop-Location}
 
 # Transaction stage: production app + vendor unlock core against this card's real PROM and
@@ -149,7 +162,7 @@ try {
 if((Get-LocalTreeDigest $repo) -ne $tree -or (Get-LocalProfile $repo).HeaderSha256 -ne $hw.HeaderSha256){throw 'Sources or profile changed while the tests ran; rerun'}
 if((Get-GuSha256 (Join-Path $local 'profile.json')) -cne $reportSha){throw 'Profile report changed during tests'}
 Assert-LocalFixtures $repo $report.Fixtures
-$expectedJobs=Get-LocalExpectedJobs $hw.NoEdidDriver $hw.ConsoleAggregate
+$expectedJobs=Get-LocalExpectedJobs $hw.NoEdidDriver $hw.ConsoleAggregate $script:twoCard
 Assert-LocalKeys $results @($expectedJobs.Keys) 'Completed host jobs'
 foreach($jobName in $expectedJobs.Keys){if($results[$jobName].Exit -ne $expectedJobs[$jobName] -or $results[$jobName].Expected -ne $expectedJobs[$jobName]){throw 'Host result mismatch'}}
 [ordered]@{Format=2;AllPassed=$true;HardwareAccess=$false;ProfileName=$hw.Name;HeaderSha256=$hw.HeaderSha256;PromSha256=$hw.Prom;

@@ -158,3 +158,26 @@ static BOOLEAN GuHeadlessCheck(VOID) {
   bs->RestoreTPL(old);
   return valid;
 }
+/* Local two-card lane, final gate only: the GPU about to transact carries no
+   driver, child or foreign exclusive open, only this image's own claim. Target
+   handles are volatile in the graph comparison above, so the single-card
+   invariant PR #82 dropped is restored here, after every guarded release. */
+static BOOLEAN GuHeadlessTargetClean(VOID) {
+  EFI_BOOT_SERVICES *bs=Gu.bs;
+  if(!bs || !bs->RaiseTPL || !bs->RestoreTPL || !Gu.handle || !Gu.owned)return FALSE;
+  static GU_HEADLESS_GRAPH current;
+  EFI_TPL old=bs->RaiseTPL(TPL_NOTIFY);
+  EFI_STATUS s=GuHeadlessSnapshot(&current);
+  UINTN own=0;BOOLEAN clean=s==EFI_SUCCESS;
+  for(UINTN i=0;clean && i<current.count;i++) {
+    const GU_HEADLESS_EDGE *e=&current.edges[i];
+    /* Opens ON the GPU handle only, exactly the original single-card rule. The PCI
+       bus driver's BY_CHILD_CONTROLLER open on the root bridge names every GPU as
+       its controller (seen in the 2026-11-21 capture); that edge is expected. */
+    if(e->handle!=Gu.handle)continue;
+    if(GuHeadlessOwn(e)){own++;continue;}
+    clean=FALSE;
+  }
+  bs->RestoreTPL(old);
+  return clean && own==1;
+}

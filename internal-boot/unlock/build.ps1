@@ -8,6 +8,7 @@ param(
  [switch]$AutomaticBoot,
  [switch]$HeadlessResearch,
  [switch]$UsbMedia,
+ [switch]$SecondCard,
  [ValidateSet('original03100062','observed03000062','entryLatchedSs1Preserve','entryLatchedSs1Full')][string]$StockProfile,
  [ValidateSet('b650m-3090fe','b660m-3070ti','b660m-3090ti','x870-3090ti','b660plus-3060','h610m-3060','b660m-dual','b660m-dual-3090ti','local')][string]$HardwareProfile='b650m-3090fe'
 )
@@ -51,6 +52,12 @@ try {
  if($HeadlessResearch){$out+='/headless-research';$name+='-HEADLESS-RESEARCH';$defines+='-DGU_HEADLESS_RESEARCH'}
  if($UsbMedia -and !$HeadlessResearch){throw 'USB media is only wired for the headless research child'}
  if($UsbMedia){$out+='/usb';$name+='-USB';$defines+='-DGU_USB_MEDIA'}
+ # Local two-card lane (2026-11-21): hand-written profile-local-extra.h, headless USB local only.
+ if($SecondCard) {
+  if($HardwareProfile -ne 'local' -or !$HeadlessResearch -or !$UsbMedia){throw 'SecondCard is only for the local headless USB child'}
+  if(!(Test-Path -LiteralPath (Join-Path $PSScriptRoot 'profile-local-extra.h') -PathType Leaf)){throw 'SecondCard needs internal-boot/unlock/profile-local-extra.h'}
+  $defines+='-DGU_LOCAL_SECOND_CARD' # same path/name; the manifest Defines record it
+ }
   if($ExperimentalUnlock){$defines+= '-DGU_EXPERIMENTAL_3090';$defines+=$(switch($StockProfile){'original03100062'{'-DGU_STOCK_PROFILE_ORIGINAL_03100062'} 'observed03000062'{'-DGU_STOCK_PROFILE_OBSERVED_03000062'} 'entryLatchedSs1Preserve'{'-DGU_ENTRY_LATCHED_SS1_PRESERVE'} 'entryLatchedSs1Full'{'-DGU_ENTRY_LATCHED_SS1_FULL'}})}
  New-Item -ItemType Directory -Path $out -Force | Out-Null
  $sources=@('app','app_io','ownership','format','runtime','sha256','checks','port','compat',

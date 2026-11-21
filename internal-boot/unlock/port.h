@@ -91,6 +91,13 @@ extern GU_PLATFORM Gu;
 typedef struct {
   UINT32 id, subsystem, chip, memory;
   const char *prom_sha256, *name;
+  /* Local two-card lane (2026-11-21). bus 0 = not pinned (named multi profiles);
+     a nonzero bus pins segment/bus with device/function 0. */
+  UINTN segment, bus;
+  /* Firmware nvgop fingerprint for the child-side guarded release. A NULL hash
+     keeps the reviewed PR #82 behaviour; a row with a hash refuses any other driver. */
+  UINT32 nvgop_version, nvgop_image_size, nvgop_stop, nvgop_text_bytes;
+  const char *nvgop_text_sha256;
 } GU_CARD_SPEC;
 
 /* Target registry: cards found by PCI enumeration, ordered so every
