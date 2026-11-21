@@ -53,7 +53,9 @@
       "family": "GA106",
       "memory": ["3000"],
       "pci_memory": {"250410de": ["3000"]},
-      "nvgop": [{"version": "60010", "text_sha256": "615b37a708b1894e18d7fa60cfcdacaa4d8b598863a10b8103d231a595847b2b"}],
+      "nvgop": [{"version": "60010", "text_sha256": "615b37a708b1894e18d7fa60cfcdacaa4d8b598863a10b8103d231a595847b2b"},
+                {"version": "6000a", "text_sha256": "8924ba488419e5d82b524d10e8dd63bfe886f077026fae1a9cc03e25b920b276"}],
+      "_local_note": "LOCAL CHANGE 2026-11-07 (main PC, ASUS 1043:881D RTX 3060 2504): its GOP is nvgop-ga1xx 6000a with .text sha256 8924ba48..., byte-identical to the 6000a already proven for 2204 (issue #102). Not upstream.",
       "evidence": ["evidence/h610m-3060-usb"]
     }
   ],
