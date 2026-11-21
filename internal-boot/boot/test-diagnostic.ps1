@@ -53,6 +53,21 @@ try {
  if($LASTEXITCODE -ne 0){throw 'Generic probe (bus 0x2b) tests compile failed'}
  & ./build/diagnostic/test-probe-generic-bus2b.exe
   if($LASTEXITCODE -ne 0){throw 'Generic probe (bus 0x2b) tests failed'}
+# Two-card machine (local): explicit bus 0x25 plus another NVIDIA card logged by location only.
+ foreach($bus in @('0x25U','0x29U','0xffU')) {
+  $dest="build/diagnostic/test-probe-select-$($bus.TrimEnd('U')).exe"
+  & $Clang -std=c11 -O1 -Wall -Wextra -Werror -D_CRT_SECURE_NO_WARNINGS -DGU_DIAGNOSTIC_ONLY -DGU_DIAGNOSTIC_PROBE -DGU_PROBE_GENERIC "-DGU_PROBE_BUS=$bus" -DGU_PROBE_SELECT_BUS -I ../../deps/edk2/MdePkg/Include -I ../../deps/edk2/MdePkg/Include/X64 test_probe_generic.c probe.c ../unlock/sha256.c -o $dest
+  if($LASTEXITCODE -ne 0){throw "Select-bus probe compile failed: $bus"}
+  & "./$dest"
+  if($LASTEXITCODE -ne 0){throw "Select-bus probe tests failed: $bus"}
+ }
+ $ErrorActionPreference='Continue'
+ foreach($bad in @(@('-DGU_PROBE_GENERIC'),@('-DGU_PROBE_GENERIC','-DGU_PROBE_AUTO_BUS'),@('-DGU_PROBE_BUS=0x25U'),@('-DGU_PROBE_GENERIC','-DGU_PROBE_BUS=0x25U','-DGU_FULL_UNLOCK'))) {
+  $out=& $Clang -target x86_64-pc-windows-msvc -std=c11 -ffreestanding -fsyntax-only -DGU_DIAGNOSTIC_ONLY -DGU_DIAGNOSTIC_PROBE -DGU_PROBE_SELECT_BUS @bad -I ../../deps/edk2/MdePkg/Include -I ../../deps/edk2/MdePkg/Include/X64 probe.c 2>&1 | Out-String
+  if($LASTEXITCODE -eq 0 -or $out -notmatch 'GU_PROBE_SELECT_BUS requires an explicit'){throw "Select-bus guard missed: $($bad -join ' ')"}
+ }
+ $ErrorActionPreference='Stop'
+ 'PASS select-bus probe guards'
   foreach($bus in @(1,43,255)) {
    $dest="build/diagnostic/test-probe-auto-$bus.exe"
    & $Clang -std=c11 -O1 -Wall -Wextra -Werror -D_CRT_SECURE_NO_WARNINGS -DGU_DIAGNOSTIC_ONLY -DGU_DIAGNOSTIC_PROBE -DGU_PROBE_GENERIC -DGU_PROBE_AUTO_BUS "-DGU_TEST_PROBE_BUS=$bus" -I ../../deps/edk2/MdePkg/Include -I ../../deps/edk2/MdePkg/Include/X64 test_probe_generic.c probe.c ../unlock/sha256.c -o $dest

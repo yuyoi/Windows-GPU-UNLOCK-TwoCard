@@ -24,7 +24,9 @@ function Assert-GuGenericProbeManifest([string]$Repo,$Manifest,[string]$Efi) {
  elseif($Manifest.ProbeBusMode -is [string] -and $Manifest.ProbeBusMode -ceq 'explicit' -and
         ($Manifest.TargetBus -is [int] -or $Manifest.TargetBus -is [long]) -and $Manifest.TargetBus -ge 1 -and $Manifest.TargetBus -le 255){
   $defines+=('-DGU_PROBE_BUS=0x{0:x}U' -f [int]$Manifest.TargetBus)
+  if($Manifest.OtherNvidia -is [bool] -and $Manifest.OtherNvidia){$defines+='-DGU_PROBE_SELECT_BUS'}
  }else{throw 'Generic probe bus metadata is invalid'}
+ if($null -ne $Manifest.OtherNvidia -and ($Manifest.OtherNvidia -isnot [bool] -or ($Manifest.OtherNvidia -and $Manifest.ProbeBusMode -cne 'explicit'))){throw 'Generic probe OtherNvidia metadata is invalid'}
  if(@($Manifest.Defines).Count -ne $defines.Count){throw 'Generic probe define set is incomplete'}
  foreach($define in $defines){if(@($Manifest.Defines | Where-Object {$_ -is [string] -and $_ -ceq $define}).Count -ne 1){throw 'Generic probe define set is invalid'}}
  $expected=@(Get-GuGenericProbeFiles);$rows=@($Manifest.Sources)

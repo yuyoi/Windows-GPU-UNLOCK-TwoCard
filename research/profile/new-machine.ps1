@@ -11,7 +11,7 @@
 param([Parameter(Mandatory)][ValidatePattern('^[D-Zd-z]$')][string]$Drive,[Parameter(Mandatory)][guid]$WindowsEspGuid,
  [Parameter(Mandatory)][string]$Assets,[switch]$StageUnlock,
  [string]$Clang='clang',[string]$LldLink='lld-link',[string]$Python='python',[string]$VcVars,
- [ValidateRange(1,255)][int]$TargetBus)
+ [ValidateRange(1,255)][int]$TargetBus,[switch]$OtherNvidia)
 $ErrorActionPreference='Stop'
 $repo=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 . (Join-Path $repo 'internal-boot/unlock/local-profile.ps1')
@@ -26,6 +26,7 @@ function Captures {@(Get-ChildItem -LiteralPath $dir -Filter 'DIAG??.TXT' -File 
 if(!(Test-Path -LiteralPath $dir) -or (Captures).Count -lt $need) {
  $probeOptions=@{}
  if($PSBoundParameters.ContainsKey('TargetBus')){$probeOptions.TargetBus=$TargetBus}
+ if($OtherNvidia){$probeOptions.OtherNvidia=$true}
  & (Join-Path $PSScriptRoot 'build-probe.ps1') -WindowsEspGuid $WindowsEspGuid -Clang $Clang -LldLink $LldLink -Python $Python @probeOptions
  if(!$?){throw 'Probe build failed'}
  $m=Get-Content -LiteralPath (Join-Path $repo 'internal-boot/boot/build/probe-generic/manifest.json') -Raw | ConvertFrom-Json

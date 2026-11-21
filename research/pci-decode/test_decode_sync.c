@@ -87,7 +87,7 @@ static void Refuse(MODEL *m,unsigned writes) {
 }
 int main(void) {
   MODEL m;
-  const UINT32 cards[]={0x220410de,0x220310de,0x248410de,0x248710de,0x250410de};
+  const UINT32 cards[]={0x220410de,0x220310de,0x248410de,0x248710de,0x250410de,0x250310de};
   for(unsigned parents=1;parents<=GU_DS_MAX_PARENTS;parents++)for(unsigned seg=0;seg<3;seg++) {
     Setup(&m,parents,seg==2?0xffffU:seg);m.Reenter=1;
     m.Expected.Gpu.Config[0]=m.State.Gpu.Config[0]=cards[parents%5];

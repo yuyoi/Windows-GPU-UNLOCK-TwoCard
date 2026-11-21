@@ -33,6 +33,12 @@
 #if defined(GU_PROBE_AUTO_BUS) && (!defined(GU_PROBE_GENERIC) || !defined(GU_DIAGNOSTIC_ONLY) || !defined(GU_DIAGNOSTIC_PROBE) || defined(GU_PROBE_BUS) || defined(GU_FULL_UNLOCK) || defined(GU_EXPERIMENTAL_3090))
 #error GU_PROBE_AUTO_BUS requires an unconstrained generic read-only diagnostic probe
 #endif
+/* Two-card machines (local 2026-11-20): with an explicit bus, other NVIDIA display
+ * controllers are inventoried and logged by location/id only. They get no config dump,
+ * no BAR/MMIO/PROM access and never become the target. */
+#if defined(GU_PROBE_SELECT_BUS) && (!defined(GU_PROBE_GENERIC) || !defined(GU_DIAGNOSTIC_ONLY) || !defined(GU_DIAGNOSTIC_PROBE) || !defined(GU_PROBE_BUS) || defined(GU_PROBE_AUTO_BUS) || defined(GU_FULL_UNLOCK) || defined(GU_EXPERIMENTAL_3090))
+#error GU_PROBE_SELECT_BUS requires an explicit GU_PROBE_BUS in the generic read-only diagnostic probe
+#endif
 #ifndef GU_PROBE_BUS
 #define GU_PROBE_BUS 1U
 #endif
@@ -171,7 +177,9 @@ static VOID DumpProm(CAPTURE *c,EFI_FILE_PROTOCOL *root,UINT8 *page) {
 static BOOLEAN ProbeEnvelope(CAPTURE *c,EFI_PCI_IO_PROTOCOL *io,const UINT32 *cfg) {
 #ifdef GU_PROBE_GENERIC
   BOOLEAN identity=cfg[0]==0x220410deU || cfg[0]==0x220310deU ||
-    cfg[0]==0x248710deU || cfg[0]==0x250410deU || cfg[0]==0x248410deU || cfg[0]==0x24c910deU || cfg[0]==0x220a10deU;
+    cfg[0]==0x248710deU || cfg[0]==0x250410deU || cfg[0]==0x248410deU || cfg[0]==0x24c910deU || cfg[0]==0x220a10deU ||
+    /* Local two-card lane: GA106 2503 (same chip as 2504; nvgop 6000b .text 61246a83 unlocked in upstream PR #116). */
+    cfg[0]==0x250310deU;
 #else
   BOOLEAN identity=cfg[0]==GU_BOARD_ID && cfg[11]==GU_BOARD_SUBSYSTEM;
 #ifdef GU_BAR0_BASE
@@ -359,6 +367,9 @@ EFI_STATUS GuProbeGpu(EFI_SYSTEM_TABLE *t,CAPTURE *c) {
   UINT32 targetId=0,targetClass=0;UINTN targetSegment=0,targetBus=0;
   BOOLEAN targetValidated=FALSE;
 #endif
+#ifdef GU_PROBE_SELECT_BUS
+  UINTN others=0,othersSeen=0;
+#endif
   /* Count all display targets before any MMIO/PROM access. Multiple devices
    * cannot share a single PROM.BIN or be used to generate one local profile. */
   for(UINTN i=0;i<n;i++) {
@@ -373,7 +384,9 @@ EFI_STATUS GuProbeGpu(EFI_SYSTEM_TABLE *t,CAPTURE *c) {
     UINTN seg=0,bus=0,dev=0,fun=0;
     if(!io->GetLocation || io->GetLocation(io,&seg,&bus,&dev,&fun)!=EFI_SUCCESS ||
        seg>0xffffU || !bus || bus>255 || dev || fun){inventoryOk=FALSE;continue;}
-#ifndef GU_PROBE_AUTO_BUS
+#ifdef GU_PROBE_SELECT_BUS
+    if(bus!=GU_PROBE_BUS){candidates--;others++;continue;}
+#elif !defined(GU_PROBE_AUTO_BUS)
     if(bus!=GU_PROBE_BUS){inventoryOk=FALSE;continue;}
 #endif
     targetHandle=hs[i];targetIo=io;targetId=id;targetClass=cls;targetSegment=seg;targetBus=bus;
@@ -388,9 +401,19 @@ EFI_STATUS GuProbeGpu(EFI_SYSTEM_TABLE *t,CAPTURE *c) {
     if(!io->Pci.Read || !io->GetLocation){Problem(c,"pci-methods",EFI_UNSUPPORTED);continue;}
     if(io->Pci.Read(io,EfiPciIoWidthUint32,0,1,&id)!=EFI_SUCCESS)continue;
     if(!ProbeTarget(io,id))continue;
-    found++;
     UINTN seg=0,bus=0,dev=0,fun=0;
     EFI_STATUS locationStatus=io->GetLocation(io,&seg,&bus,&dev,&fun);
+#ifdef GU_PROBE_SELECT_BUS
+    /* Location and identity only; a target that moved off the bus becomes
+     * probe-inventory-target-lost below, never a capture of this card. */
+    if(locationStatus==EFI_SUCCESS && bus!=GU_PROBE_BUS) {
+      othersSeen++;
+      Text(c,"probe-other-nvidia seg=0x");Hex(c,seg,4);Text(c," bus=0x");Hex(c,bus,4);
+      Text(c," dev=0x");Hex(c,dev,4);Text(c," fun=0x");Hex(c,fun,4);Text(c," id=0x");Hex(c,id,8);End(c);
+      continue;
+    }
+#endif
+    found++;
     if(locationStatus==EFI_SUCCESS) {
       Text(c,"probe-target seg=0x");Hex(c,seg,4);Text(c," bus=0x");Hex(c,bus,4);
       Text(c," dev=0x");Hex(c,dev,4);Text(c," fun=0x");Hex(c,fun,4);End(c);
@@ -456,6 +479,9 @@ EFI_STATUS GuProbeGpu(EFI_SYSTEM_TABLE *t,CAPTURE *c) {
   /* A selected target disappearing or turning non-display during the second
    * pass must not become a successful inventory-only capture. */
   if(inventoryOk && candidates==1 && !targetValidated)Problem(c,"probe-inventory-target-lost",EFI_NOT_READY);
+#endif
+#ifdef GU_PROBE_SELECT_BUS
+  if(othersSeen!=others)Problem(c,"probe-other-nvidia-changed",EFI_NOT_READY);
 #endif
   if(hs)bs->FreePool(hs);
   Text(c,"probe targets=");Hex(c,found,4);Text(c," cfg-incomplete=");Hex(c,cfgFailed,4);End(c);

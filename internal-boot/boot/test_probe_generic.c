@@ -18,7 +18,7 @@ enum {G_OK,G_UNKNOWN,G_BME,G_MEM_OFF,G_BAD_BAR,G_BAD_RESOURCE,G_CHANGED,G_MULTI,
       G_INVENTORY_READ_FAIL,G_INVENTORY_CLASS_FAIL,G_INITIAL_INTERFACE,G_INITIAL_ID,
       G_INITIAL_CLASS,G_INITIAL_BUS,G_MIXED_MULTI,G_NO_DISPLAY,
       G_LOST_HANDLE,G_LOST_ID,G_LOST_VENDOR,G_LOST_CLASS,G_LOST_CLASS_READ,
-      G_INITIAL_SEGMENT,G_ATTR_SEGMENT,G_MULTI_SEGMENT};
+      G_INITIAL_SEGMENT,G_ATTR_SEGMENT,G_MULTI_SEGMENT,G_OTHER_CARD,G_OTHER_CARD_MOVED};
 static int Mode,RootCloses,RootOpens,ForeignOpens,SfsSearches,Dumps,ExistingWriteAttempts;
 static EFI_FILE_PROTOCOL DumpFile,ForeignRoot;
 static EFI_HANDLE BindingHandle=(VOID *)50,ImageHandle=(VOID *)51;
@@ -33,11 +33,20 @@ static EFI_PCI_IO_PROTOCOL ChangedPci;
 static UINTN TestSegment,TestBus;
 static UINT32 TestId;
 static int LocationCalls;
+/* Two-card fixture: a second NVIDIA display controller on another bus. */
+static EFI_PCI_IO_PROTOCOL OtherPci;
+static int OtherLocationCalls,OtherCfgReads;
+#define OTHER_BUS (TestBus==255?1U:TestBus+1U)
 
 static EFI_STATUS EFIAPI GenericRead(EFI_PCI_IO_PROTOCOL *io,EFI_PCI_IO_PROTOCOL_WIDTH w,UINT32 at,UINTN n,VOID *data) {
   if(w==EfiPciIoWidthUint32 && at==8 && n==1){
     *(UINT32 *)data=(Mode==G_NO_DISPLAY || (Mode==G_LOST_CLASS && S.IdReads>1))?0x020000a1:0x030000a1;
     return (Mode==G_INVENTORY_CLASS_FAIL || (Mode==G_LOST_CLASS_READ && S.IdReads>1))?EFI_DEVICE_ERROR:EFI_SUCCESS;
+  }
+  if(io==&OtherPci) {
+    if(w==EfiPciIoWidthUint32 && at==0 && n==1){*(UINT32 *)data=0x250310deU;return EFI_SUCCESS;}
+    if(n==64)OtherCfgReads++;
+    return EFI_DEVICE_ERROR; /* A deep read of the other card is a test failure path. */
   }
   EFI_STATUS s=PciRead(io,w,at,n,data);
   if(s==EFI_SUCCESS && w==EfiPciIoWidthUint32 && at==0) {
@@ -78,6 +87,11 @@ static EFI_STATUS EFIAPI GuardedMem(EFI_PCI_IO_PROTOCOL *io,EFI_PCI_IO_PROTOCOL_
   return MemRead(io,w,bar,at,n,data);
 }
 static EFI_STATUS EFIAPI GenericLocation(EFI_PCI_IO_PROTOCOL *io,UINTN *seg,UINTN *bus,UINTN *dev,UINTN *fun) {
+  if(io==&OtherPci) {
+    OtherLocationCalls++;*seg=TestSegment;*dev=*fun=0;
+    *bus=(Mode==G_OTHER_CARD_MOVED && OtherLocationCalls>1)?TestBus:OTHER_BUS;
+    return EFI_SUCCESS;
+  }
   EFI_STATUS s=Location(io,seg,bus,dev,fun);
   LocationCalls++;
   *seg=TestSegment;
@@ -118,7 +132,7 @@ static EFI_STATUS EFIAPI GenericLocate(EFI_LOCATE_SEARCH_TYPE search,EFI_GUID *g
     *out=malloc(sizeof(EFI_HANDLE));if(!*out)return EFI_OUT_OF_RESOURCES;
     (*out)[0]=BindingHandle;*n=1;return EFI_SUCCESS;
   }
-  if(g && !memcmp(g,&WantPci,sizeof(*g)) && (Mode==G_MULTI || Mode==G_MIXED_MULTI || Mode==G_MULTI_SEGMENT)) {
+  if(g && !memcmp(g,&WantPci,sizeof(*g)) && (Mode==G_MULTI || Mode==G_MIXED_MULTI || Mode==G_MULTI_SEGMENT || Mode==G_OTHER_CARD || Mode==G_OTHER_CARD_MOVED)) {
     *out=malloc(2*sizeof(EFI_HANDLE));if(!*out)return EFI_OUT_OF_RESOURCES;
     (*out)[0]=PciHandle;(*out)[1]=(VOID *)4;*n=2;return EFI_SUCCESS;
   }
@@ -131,7 +145,7 @@ static EFI_STATUS EFIAPI GenericHandle(EFI_HANDLE h,EFI_GUID *g,VOID **out) {
   if(Mode==G_LOST_HANDLE && S.IdReads && h==PciHandle && !memcmp(g,&WantPci,sizeof(*g))) {
     *out=NULL;return EFI_NOT_FOUND;
   }
-  if(h==(VOID *)4 && !memcmp(g,&WantPci,sizeof(*g))){*out=Mode==G_MULTI_SEGMENT?&ChangedPci:&Pci;return EFI_SUCCESS;}
+  if(h==(VOID *)4 && !memcmp(g,&WantPci,sizeof(*g))){*out=(Mode==G_OTHER_CARD || Mode==G_OTHER_CARD_MOVED)?&OtherPci:(Mode==G_MULTI_SEGMENT?&ChangedPci:&Pci);return EFI_SUCCESS;}
   if(Mode==G_PROTOCOL_CHANGED && h==PciHandle && S.PromAllocs){*out=NULL;return EFI_NOT_FOUND;}
   if(Mode==G_ATTR_INTERFACE && AttributeReturned && h==PciHandle && !memcmp(g,&WantPci,sizeof(*g))) {
     *out=&ChangedPci;return EFI_SUCCESS;
@@ -171,12 +185,12 @@ static void GenericSetup(int mode) {
   Pci.Attributes=Attr;AttributeGets=AttributeOthers=0;
   AttributeReturned=FALSE;AttributeConfigReads=0;
   TestSegment=0;TestBus=GU_TEST_PROBE_BUS;TestId=GU_BOARD_ID;LocationCalls=0;ChangedPci=Pci;
+  OtherPci=Pci;OtherLocationCalls=OtherCfgReads=0;
   Bs.LocateHandleBuffer=GenericLocate;Bs.HandleProtocol=GenericHandle;
   memset(&Binding,0,sizeof(Binding));Binding.ImageHandle=ImageHandle;
   memset(&Image,0,sizeof(Image));Image.ImageBase=ImageBytes;Image.ImageSize=sizeof(ImageBytes);
   DumpFile=LogFile;DumpFile.Write=DumpWrite;DumpFile.Flush=DumpFlush;DumpFile.Close=DumpClose;
-  RootFile.Open=DumpOpen;RootFile.Close=BorrowedClose;ForeignRoot=RootFile;
-}
+  RootFile.Open=DumpOpen;RootFile.Close=BorrowedClose;ForeignRoot=RootFile;}
 static EFI_STATUS GenericRun(int mode,BOOLEAN withRoot) {
   GenericSetup(mode);
   EFI_STATUS s=GuCaptureGraphOnVolume(&Table,&LogFile,withRoot?&RootFile:NULL);
@@ -236,7 +250,7 @@ int main(void) {
     Check(!S.RegReads && !S.PromReads,"bad inventory permits no deep reads");
     Check(!Logged("capture-complete=1"),"bad inventory cannot claim a complete capture");
   }
-  const UINT32 reviewedIds[]={0x220310deU,0x248710deU,0x250410deU,0x248410deU,0x24c910deU,0x220a10deU};
+  const UINT32 reviewedIds[]={0x220310deU,0x248710deU,0x250410deU,0x248410deU,0x24c910deU,0x220a10deU,0x250310deU};
   for(UINTN i=0;i<sizeof(reviewedIds)/sizeof(reviewedIds[0]);i++) {
     GenericSetup(G_OK);TestId=reviewedIds[i];
     Check(GuCaptureGraphOnVolume(&Table,&LogFile,&RootFile)==EFI_SUCCESS,"reviewed GA10x capture identity succeeds");
@@ -253,6 +267,21 @@ int main(void) {
     Check(GuCaptureGraphOnVolume(&Table,&LogFile,&RootFile)==EFI_NOT_READY && !S.RegReads && !S.PromReads,
           "nonzero segment drift after attribute callback permits no deep reads");
   }
+#ifdef GU_PROBE_SELECT_BUS
+  Check(GenericRun(G_OTHER_CARD,TRUE)==EFI_SUCCESS,"two-card machine captures the explicit-bus target");
+  Check(S.RegReads==16 && S.PromReads==PROM_DWORDS,"only the target gets the bounded deep reads");
+  Check(!OtherCfgReads,"the other NVIDIA card gets no config dump");
+  Check(Logged("probe-other-nvidia seg=0x0000") && Logged("id=0x250310de"),"the other card is logged by location and id only");
+  Check(Logged("capture-complete=1"),"two-card capture is complete");
+  Check(GenericRun(G_OTHER_CARD_MOVED,TRUE)==EFI_NOT_READY,"another card appearing on the target bus fails closed");
+  /* As with G_MULTI, a handle on the target bus gets a config read before the identity
+   * recheck refuses it; it never gets MMIO or PROM reads (other-card Mem reads fail). */
+  Check(S.RegReads<=16 && S.PromReads<=(int)PROM_DWORDS && (Logged("probe-inventory-changed") || Logged("incomplete reason=cfg256")),"moved other card is refused before any deep read");
+  Check(!Logged("capture-complete=1"),"moved other card permits no complete capture");
+#else
+  Check(GenericRun(G_OTHER_CARD,TRUE)==EFI_NOT_READY,"without select-bus a second NVIDIA card is refused");
+  Check(!S.RegReads && !S.PromReads,"refused two-card inventory permits no deep reads");
+#endif
 #ifdef GU_PROBE_AUTO_BUS
   const UINTN buses[]={1,0x2b,255};
   for(UINTN i=0;i<sizeof(buses)/sizeof(buses[0]);i++) {

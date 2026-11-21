@@ -36,7 +36,7 @@ BOOLEAN GuDecodeSnapshotValid(const GU_DS_SNAPSHOT *s) {
      !g->Config[11] || g->Config[11]==0xffffffffU || g->Supported==~0ULL || !(g->Supported&GU_DS_IO) ||
      (g->Attributes!=GU_DS_MEMORY && g->Attributes!=(GU_DS_IO|GU_DS_MEMORY)))return FALSE;
   switch(g->Config[0]) {
-    case 0x220410deU:case 0x220310deU:case 0x248410deU:case 0x248710deU:case 0x250410deU:break;
+    case 0x220410deU:case 0x220310deU:case 0x248410deU:case 0x248710deU:case 0x250410deU:case 0x250310deU:break; /* 2503: local two-card GA106 */
     case 0x220810deU:if(!GuDsMsi3080Ti(s))return FALSE;break;
     default:return FALSE;
   }
